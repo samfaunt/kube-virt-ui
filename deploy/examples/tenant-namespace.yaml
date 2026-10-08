@@ -1,0 +1,108 @@
+# One tenant namespace. Copy per tenant and adjust the quota.
+# Requires a CNI that enforces NetworkPolicy. Talos' default Flannel does
+# NOT; use Cilium (or Calico) or the policies below are silently ignored.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    kubevirt-ui.io/tenant: "true"
+    pod-security.kubernetes.io/enforce: baseline
+---
+# Without a quota one tenant can consume the whole cluster. Quota requests,
+# not limits: a limits.* quota forces every pod (VM launchers, CDI importers)
+# to declare limits.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: team-a
+spec:
+  hard:
+    requests.cpu: "16"
+    requests.memory: 64Gi
+    requests.storage: 500Gi
+    persistentvolumeclaims: "30"
+    count/virtualmachines.kubevirt.io: "20"
+    count/datavolumes.cdi.kubevirt.io: "30"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: tenant-limits
+  namespace: team-a
+spec:
+  # Requests only. A default memory *limit* would be applied to VM launcher
+  # pods and break any VM larger than it.
+  limits:
+  - type: Container
+    defaultRequest: {cpu: 100m, memory: 128Mi}
+---
+# Isolate tenants from each other: only same-namespace traffic and the
+# ingress controller may reach VMs. Adjust the ingress namespace label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-isolation
+  namespace: team-a
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+---
+# Browser image uploads: CDI's upload proxy (in the cdi namespace) streams
+# the data to a per-image upload server pod in this namespace. Without this
+# the tenant-isolation policy above blocks it and uploads fail with
+# "connection refused". Adjust the namespace if CDI lives elsewhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cdi-upload-server
+  namespace: team-a
+spec:
+  podSelector:
+    matchLabels:
+      cdi.kubevirt.io: cdi-upload-server
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cdi
+    ports:
+    - {protocol: TCP, port: 8443}
+---
+# Users may import disks from any URL. The CDI importer pod runs in this
+# namespace and fetches that URL, so without this policy a user could make
+# it request cluster-internal services or link-local metadata endpoints
+# (server-side request forgery). Allow DNS plus public internet only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: importer-egress
+  namespace: team-a
+spec:
+  podSelector:
+    matchLabels:
+      cdi.kubevirt.io: importer
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8]

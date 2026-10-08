@@ -1,0 +1,10 @@
+Create the first admin account:
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "kvui.name" . }} -- /app/kvui admin-invite
+
+Open the printed link within 24 hours. Then label each namespace users may
+be invited into:
+
+  kubectl label namespace <name> kubevirt-ui.io/tenant=true
+
+See deploy/examples/tenant-namespace.yaml for quota and network isolation.

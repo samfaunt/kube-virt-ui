@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kvui.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+spec:
+  # SQLite and the in-memory rate limiter require exactly one replica.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {{- include "kvui.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "kvui.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "kvui.name" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: kvui
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - {name: KVUI_PUBLIC_URL, value: {{ .Values.publicURL | quote }}}
+        - {name: KVUI_DB, value: /data/kvui.db}
+        - {name: KVUI_STATIC_DIR, value: /app/static}
+        - {name: KVUI_TRUST_PROXY, value: {{ .Values.ingress.enabled | quote }}}
+        - {name: KVUI_CDI_NAMESPACE, value: {{ .Values.cdi.namespace | quote }}}
+        - name: KVUI_SECRET_KEY
+          valueFrom:
+            secretKeyRef: {name: {{ include "kvui.secretName" . }}, key: secret-key}
+        ports:
+        - {name: http, containerPort: 8080}
+        readinessProbe:
+          httpGet: {path: /healthz, port: http}
+        livenessProbe:
+          httpGet: {path: /healthz, port: http}
+        resources: {{- toYaml .Values.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ .Release.Name }}-data

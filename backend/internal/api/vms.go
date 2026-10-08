@@ -1,0 +1,287 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	authzv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
+	"kvui/internal/store"
+	"kvui/internal/vm"
+)
+
+const (
+	// watchMaxDuration bounds each live-update stream. A watch keeps running
+	// on the token it started with, so streams are cut periodically and the
+	// browser reconnects, which re-checks the membership.
+	watchMaxDuration = 5 * time.Minute
+	watchDebounce    = 300 * time.Millisecond
+	watchHeartbeat   = 25 * time.Second
+)
+
+// userClients are Kubernetes clients authenticated as the current user's
+// ServiceAccount in one namespace.
+type userClients struct {
+	namespace, role string
+	cfg             *rest.Config
+	kube            kubernetes.Interface
+	dyn             dynamic.Interface
+}
+
+// clientsFor checks the current user is a member of the {ns} URL namespace
+// and returns clients acting as them there. It writes the error response
+// itself on failure.
+func (s *Server) clientsFor(w http.ResponseWriter, r *http.Request) (userClients, bool) {
+	u, ns := currentUser(r), chi.URLParam(r, "ns")
+	m, err := s.Store.Membership(r.Context(), u.ID, ns)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusForbidden, "not a member of this namespace")
+		return userClients{}, false
+	}
+	if err != nil {
+		internalError(w, r, err)
+		return userClients{}, false
+	}
+	cfg, err := s.Tenants.UserConfig(r.Context(), ns, u.ID, u.Username, m.Role)
+	if err != nil {
+		internalError(w, r, err)
+		return userClients{}, false
+	}
+	kube, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		internalError(w, r, err)
+		return userClients{}, false
+	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		internalError(w, r, err)
+		return userClients{}, false
+	}
+	return userClients{namespace: ns, role: m.Role, cfg: cfg, kube: kube, dyn: dyn}, true
+}
+
+// kubeError relays apiserver refusals (forbidden, not found, conflict) to
+// the user and treats anything else as an internal error.
+func kubeError(w http.ResponseWriter, r *http.Request, err error) {
+	var status apierrors.APIStatus
+	if errors.As(err, &status) {
+		if code := int(status.Status().Code); code >= 400 && code < 500 {
+			writeError(w, code, status.Status().Message)
+			return
+		}
+	}
+	internalError(w, r, err)
+}
+
+// access returns what the current user may do in a namespace, as computed by
+// the apiserver for their ServiceAccount.
+func (s *Server) access(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	review, err := c.kube.AuthorizationV1().SelfSubjectRulesReviews().Create(r.Context(),
+		&authzv1.SelfSubjectRulesReview{Spec: authzv1.SelfSubjectRulesReviewSpec{Namespace: c.namespace}}, metav1.CreateOptions{})
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"role": c.role, "rules": review.Status.ResourceRules})
+}
+
+func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	vms, err := vm.List(r.Context(), c.dyn, c.namespace)
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vms)
+}
+
+func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	summary, err := vm.Get(r.Context(), c.dyn, c.namespace, chi.URLParam(r, "name"))
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) vmAction(w http.ResponseWriter, r *http.Request) {
+	action := chi.URLParam(r, "action")
+	if _, ok := vm.Actions[action]; !ok {
+		writeError(w, http.StatusNotFound, "unknown action")
+		return
+	}
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	name := chi.URLParam(r, "name")
+	if err := vm.Do(r.Context(), c.kube.CoreV1().RESTClient(), c.namespace, name, action); err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	s.audit(r, currentUser(r), "vm."+action, c.namespace, name)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// watchVMs streams the namespace's VM list as server-sent events: the full
+// list on connect and again (debounced) after every change.
+func (s *Server) watchVMs(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		internalError(w, r, errors.New("streaming unsupported"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), watchMaxDuration)
+	defer cancel()
+	changes, err := vm.Watch(ctx, c.dyn, c.namespace)
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("X-Accel-Buffering", "no") // disable nginx ingress buffering
+	fmt.Fprint(w, "retry: 2000\n\n")
+
+	send := func() bool {
+		vms, err := vm.List(ctx, c.dyn, c.namespace)
+		if err != nil {
+			if ctx.Err() == nil {
+				fmt.Fprintf(w, "event: failure\ndata: %q\n\n", err.Error())
+				flusher.Flush()
+			}
+			return false
+		}
+		data, _ := json.Marshal(vms)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+		return true
+	}
+	if !send() {
+		return
+	}
+
+	heartbeat := time.NewTicker(watchHeartbeat)
+	defer heartbeat.Stop()
+	debounce := time.NewTimer(0)
+	<-debounce.C
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-changes:
+			if !ok {
+				return
+			}
+			debounce.Reset(watchDebounce)
+		case <-debounce.C:
+			if !send() {
+				return
+			}
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
+}
+
+type storageClass struct {
+	Name    string `json:"name"`
+	Default bool   `json:"default"`
+}
+
+// vmOptions returns the choices for the create-VM form. Instancetypes and
+// preferences are listed as the user; storage classes are cluster-scoped
+// and not sensitive, so the backend lists them itself.
+func (s *Server) vmOptions(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	its, err := vm.ListInstancetypes(r.Context(), c.dyn, c.namespace)
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	prefs, err := vm.ListPreferences(r.Context(), c.dyn, c.namespace)
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	list, err := s.Kube.StorageV1().StorageClasses().List(r.Context(), metav1.ListOptions{})
+	if err != nil {
+		internalError(w, r, err)
+		return
+	}
+	scs := make([]storageClass, 0, len(list.Items))
+	for _, sc := range list.Items {
+		scs = append(scs, storageClass{Name: sc.Name, Default: sc.Annotations["storageclass.kubernetes.io/is-default-class"] == "true"})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instancetypes": nonNil(its), "preferences": nonNil(prefs), "storageClasses": scs,
+	})
+}
+
+func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
+	var req vm.CreateRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	u := currentUser(r)
+	err := vm.Create(r.Context(), c.dyn, c.namespace, u.Username, &req)
+	if vm.IsValidation(err) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	s.audit(r, u, "vm.create", c.namespace, req.Name)
+	writeJSON(w, http.StatusCreated, map[string]string{"name": req.Name})
+}
+
+func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.clientsFor(w, r)
+	if !ok {
+		return
+	}
+	name := chi.URLParam(r, "name")
+	if err := vm.Delete(r.Context(), c.dyn, c.namespace, name); err != nil {
+		kubeError(w, r, err)
+		return
+	}
+	s.audit(r, currentUser(r), "vm.delete", c.namespace, name)
+	w.WriteHeader(http.StatusNoContent)
+}

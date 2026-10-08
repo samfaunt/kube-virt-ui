@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kvui.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+---
+# The backend only provisions per-user ServiceAccounts and RoleBindings, may
+# only bind the three kubevirt-ui tenant roles, and reads storage classes.
+# It never touches VMs with its own identity. Tenant namespaces are created by cluster admins and
+# labelled kubevirt-ui.io/tenant=true; the backend refuses all others.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubevirt-ui-backend
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [namespaces]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [serviceaccounts]
+  verbs: [get, create, delete]
+- apiGroups: [""]
+  resources: [serviceaccounts/token]
+  verbs: [create]
+- apiGroups: [rbac.authorization.k8s.io]
+  resources: [rolebindings]
+  verbs: [get, create, delete]
+- apiGroups: [storage.k8s.io]
+  resources: [storageclasses]   # offered in the create-VM form
+  verbs: [get, list]
+- apiGroups: [rbac.authorization.k8s.io]
+  resources: [clusterroles]
+  verbs: [bind]
+  resourceNames: [kubevirt-ui-owner, kubevirt-ui-operator, kubevirt-ui-viewer]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubevirt-ui-backend
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubevirt-ui-backend
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kvui.name" . }}
+  namespace: {{ .Release.Namespace }}
+---
+# Read the CA bundle of CDI's upload proxy, to verify it when streaming
+# image uploads.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubevirt-ui-cdi-ca
+  namespace: {{ .Values.cdi.namespace }}
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get]
+  resourceNames: [cdi-uploadproxy-signer-bundle]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubevirt-ui-cdi-ca
+  namespace: {{ .Values.cdi.namespace }}
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubevirt-ui-cdi-ca
+subjects:
+- kind: ServiceAccount
+  name: {{ include "kvui.name" . }}
+  namespace: {{ .Release.Namespace }}

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kvui.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "kvui.selector" . | nindent 4 }}
+  ports:
+  - {name: http, port: 80, targetPort: http}

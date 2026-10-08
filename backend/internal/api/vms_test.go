@@ -1,0 +1,136 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"kvui/internal/store"
+)
+
+// fakeKubeVirt answers the few KubeVirt endpoints the VM handlers use and
+// records "METHOD path token" for each request.
+func (e *env) fakeKubeVirt(w http.ResponseWriter, r *http.Request) {
+	e.requests = append(e.requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
+	if strings.HasPrefix(r.URL.Path, "/apis/subresources.kubevirt.io/v1/namespaces/team-a/virtualmachineinstances/web/") {
+		fakeConsole(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method + " " + r.URL.Path {
+	case "GET /apis/kubevirt.io/v1/namespaces/team-a/virtualmachines":
+		w.Write([]byte(`{"apiVersion":"kubevirt.io/v1","kind":"VirtualMachineList","items":[
+			{"apiVersion":"kubevirt.io/v1","kind":"VirtualMachine","metadata":{"name":"web","namespace":"team-a"},
+			 "spec":{"runStrategy":"Always"},"status":{"printableStatus":"Running","ready":true}}]}`))
+	case "GET /apis/kubevirt.io/v1/namespaces/team-a/virtualmachineinstances":
+		w.Write([]byte(`{"apiVersion":"kubevirt.io/v1","kind":"VirtualMachineInstanceList","items":[
+			{"apiVersion":"kubevirt.io/v1","kind":"VirtualMachineInstance","metadata":{"name":"web","namespace":"team-a"},
+			 "status":{"nodeName":"node-1","interfaces":[{"ipAddress":"10.0.0.5"}]}}]}`))
+	case "POST /apis/kubevirt.io/v1/namespaces/team-a/virtualmachines":
+		body, _ := io.ReadAll(r.Body)
+		e.created = body
+		w.WriteHeader(http.StatusCreated)
+		w.Write(body)
+	case "GET /apis/cdi.kubevirt.io/v1beta1/namespaces/team-a/datavolumes/iso":
+		w.Write([]byte(`{"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume","metadata":{"name":"iso","namespace":"team-a",
+			"labels":{"kubevirt-ui.io/image":"true"},"annotations":{"kubevirt-ui.io/image-type":"iso"}}}`))
+	case "GET /apis/cdi.kubevirt.io/v1beta1/namespaces/team-a/datavolumes/web-root":
+		w.Write([]byte(`{"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume","metadata":{"name":"web-root","namespace":"team-a"}}`))
+	case "POST /apis/upload.cdi.kubevirt.io/v1beta1/namespaces/team-a/uploadtokenrequests":
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"apiVersion":"upload.cdi.kubevirt.io/v1beta1","kind":"UploadTokenRequest","metadata":{"name":"iso"},
+			"status":{"token":"upload-token"}}`))
+	case "PUT /apis/subresources.kubevirt.io/v1/namespaces/team-a/virtualmachines/web/restart":
+		w.WriteHeader(http.StatusAccepted)
+	case "PUT /apis/subresources.kubevirt.io/v1/namespaces/team-a/virtualmachines/web/stop":
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":403,
+			"message":"virtualmachines/stop is forbidden"}`))
+	case "GET /apis/subresources.kubevirt.io/v1/namespaces/team-a/virtualmachineinstances/off/vnc":
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404,
+			"message":"virtualmachineinstance off not found"}`))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func TestVMListAndActionsUseUserToken(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	_, link, _ := CreateInvite(ctx, e.store, "https://ui.test", store.Invite{
+		Namespace: "team-a", Role: "operator", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	alice := e.client()
+	e.redeem(alice, link, "alice")
+
+	var vms []struct {
+		Name, Status, Node string
+		IPs                []string
+	}
+	if st := e.do(alice, "GET", "/api/namespaces/team-a/vms", nil, &vms); st != 200 {
+		t.Fatalf("list: %d", st)
+	}
+	if len(vms) != 1 || vms[0].Status != "Running" || vms[0].Node != "node-1" || vms[0].IPs[0] != "10.0.0.5" {
+		t.Fatalf("vms: %+v", vms)
+	}
+
+	if st := e.do(alice, "POST", "/api/namespaces/team-a/vms/web/restart", nil, nil); st != 204 {
+		t.Fatalf("restart: %d", st)
+	}
+	var errBody struct{ Error string }
+	if st := e.do(alice, "POST", "/api/namespaces/team-a/vms/web/stop", nil, &errBody); st != 403 || errBody.Error != "virtualmachines/stop is forbidden" {
+		t.Fatalf("forbidden passthrough: %d %+v", st, errBody)
+	}
+	if st := e.do(alice, "POST", "/api/namespaces/team-a/vms/web/destroy", nil, nil); st != 404 {
+		t.Fatalf("unknown action: %d", st)
+	}
+	if st := e.do(alice, "GET", "/api/namespaces/other/vms", nil, nil); st != 403 {
+		t.Fatalf("non-member namespace: %d", st)
+	}
+
+	// Every call reached the apiserver with alice's ServiceAccount token,
+	// never the backend's own credentials.
+	for _, r := range e.requests {
+		if want := "Bearer tok-team-a-kvui-u1"; r[len(r)-len(want):] != want {
+			t.Errorf("request not made as alice: %s", r)
+		}
+	}
+	if len(e.requests) != 5 { // VMs, VMIs, DataVolumes (404: CDI absent), restart, stop
+		t.Errorf("requests: %v", e.requests)
+	}
+}
+
+func TestCreateVM(t *testing.T) {
+	e := newEnv(t)
+	_, link, _ := CreateInvite(context.Background(), e.store, "https://ui.test", store.Invite{
+		Namespace: "team-a", Role: "owner", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	alice := e.client()
+	e.redeem(alice, link, "alice")
+
+	var errBody struct{ Error string }
+	bad := map[string]any{"name": "web", "cpus": 2, "memory": "4Gi", "diskSource": "http", "diskUrl": "http://169.254.169.254/x", "diskSize": "10Gi"}
+	if st := e.do(alice, "POST", "/api/namespaces/team-a/vms", bad, &errBody); st != 400 || e.created != nil {
+		t.Fatalf("invalid request reached apiserver: %d %s", st, errBody.Error)
+	}
+
+	req := map[string]any{"name": "web", "instancetype": map[string]string{"name": "u1.small", "kind": "VirtualMachineClusterInstancetype"},
+		"diskSource": "registry", "diskUrl": "quay.io/containerdisks/fedora:latest", "diskSize": "20Gi", "start": true}
+	if st := e.do(alice, "POST", "/api/namespaces/team-a/vms", req, nil); st != 201 {
+		t.Fatalf("create: %d", st)
+	}
+	var vm map[string]any
+	if err := json.Unmarshal(e.created, &vm); err != nil {
+		t.Fatal(err)
+	}
+	spec := vm["spec"].(map[string]any)
+	if spec["instancetype"].(map[string]any)["name"] != "u1.small" || spec["runStrategy"] != "Always" {
+		t.Fatalf("spec: %v", spec)
+	}
+	if last := e.requests[len(e.requests)-1]; !strings.HasSuffix(last, "Bearer tok-team-a-kvui-u1") {
+		t.Fatalf("not created as alice: %s", last)
+	}
+}
