@@ -1,6 +1,6 @@
 image:
-  repository: ghcr.io/example/kubevirt-ui
-  tag: ""          # defaults to .Chart.AppVersion
+  repository: ghcr.io/samfaunt/kube-virt-ui
+  tag: ""          # defaults to .Chart.AppVersion; published for each v* git tag
   pullPolicy: IfNotPresent
 
 # External URL users reach the UI on. Used to build invite links.

@@ -1,0 +1,6 @@
+.git
+docs
+**/node_modules
+frontend/dist
+**/*.db
+**/*.db-*

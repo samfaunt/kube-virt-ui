@@ -91,7 +91,7 @@ backend/    Go API (cmd/kvui, internal/{api,auth,store,tenant,vm,image})
 frontend/   React + PatternFly SPA
 deploy/     Helm chart and tenant namespace example
 docs/       screenshots
-Dockerfile  builds both into one distroless image
+Dockerfile  builds both into one distroless image (published by .github/workflows)
 ```
 
 ## Cluster prerequisites
@@ -118,12 +118,18 @@ Dockerfile  builds both into one distroless image
 
 ## Install
 
-There is no published container image yet. Build it from the `Dockerfile` and
-push it to your registry, then:
+Images for `linux/amd64` and `linux/arm64` are published to
+`ghcr.io/samfaunt/kube-virt-ui` by GitHub Actions
+(`.github/workflows/image.yml`):
+
+- `:main` and `:sha-<commit>` for every push to `main`.
+- `:X.Y.Z`, `:X.Y` and `:latest` for every `vX.Y.Z` tag.
+
+The chart defaults to the image tagged with its `appVersion`.
 
 ```sh
 helm install kvui deploy/helm/kubevirt-ui -n kubevirt-ui --create-namespace \
-  --set publicURL=https://vms.example.com --set image.repository=<your image>
+  --set publicURL=https://vms.example.com
 kubectl -n kubevirt-ui exec deploy/kubevirt-ui -- /app/kvui admin-invite
 kubectl apply -f deploy/examples/tenant-namespace.yaml   # edit first
 ```
