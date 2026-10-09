@@ -8,3 +8,8 @@ be invited into:
   kubectl label namespace <name> kubevirt-ui.io/tenant=true
 
 See deploy/examples/tenant-namespace.yaml for quota and network isolation.
+
+WARNING: every tenant namespace needs the importer-egress NetworkPolicy from
+that example, and a CNI that enforces it. Without it, users who import disks
+by URL can make CDI's importer fetch cluster-internal services or cloud
+metadata endpoints (SSRF).
