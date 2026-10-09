@@ -109,8 +109,13 @@ Dockerfile  builds both into one distroless image (published by .github/workflow
     -p '{"spec":{"claimPropertySets":[{"accessModes":["ReadWriteOnce"],"volumeMode":"Filesystem"}]}}'
   ```
 
+- **Kubernetes 1.30+** for the chart's ValidatingAdmissionPolicy, which
+  confines the backend's cluster-wide RBAC to tenant namespaces. On older
+  clusters set `admissionPolicy.enabled=false`.
 - **Ingress that allows large uploads.** Image uploads go through ingress as
   one large request; see the ingress-nginx annotations in `values.yaml`.
+  With `ingress.enabled`, set `trustedProxies` to the ingress controller's
+  pod CIDR so login rate limits and the audit log see real client addresses.
 - **A CNI that enforces NetworkPolicy** (e.g. Cilium). Talos' default Flannel
   does not, so the policies in `deploy/examples/tenant-namespace.yaml` would be
   silently ignored. Those policies also matter for security: they stop the CDI

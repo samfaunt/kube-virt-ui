@@ -1,3 +1,6 @@
+{{- if and .Values.ingress.enabled (not .Values.trustedProxies) }}
+{{- fail "ingress.enabled requires trustedProxies: the ingress controller's pod CIDR(s). Without it every user shares the ingress controller's address, so one client's failed logins lock out everyone." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,7 +31,7 @@ spec:
         - {name: KVUI_PUBLIC_URL, value: {{ .Values.publicURL | quote }}}
         - {name: KVUI_DB, value: /data/kvui.db}
         - {name: KVUI_STATIC_DIR, value: /app/static}
-        - {name: KVUI_TRUST_PROXY, value: {{ .Values.ingress.enabled | quote }}}
+        - {name: KVUI_TRUSTED_PROXIES, value: {{ join "," .Values.trustedProxies | quote }}}
         - {name: KVUI_CDI_NAMESPACE, value: {{ .Values.cdi.namespace | quote }}}
         - name: KVUI_SECRET_KEY
           valueFrom:

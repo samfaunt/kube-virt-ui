@@ -40,7 +40,7 @@ func CreateInvite(ctx context.Context, st *store.Store, publicURL string, inv st
 // usableInvite loads the invite named in the URL, writing the error
 // response itself when it is unknown or no longer usable.
 func (s *Server) usableInvite(w http.ResponseWriter, r *http.Request) (store.Invite, bool) {
-	ipKey := "ip:" + clientIP(r)
+	ipKey := s.rateKey(r)
 	if !s.inviteLimiter.Allowed(ipKey) {
 		writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
 		return store.Invite{}, false
@@ -130,7 +130,7 @@ func (s *Server) redeemInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	step, ok := auth.VerifyTOTP(secret, strings.TrimSpace(req.Code), s.now())
 	if !ok {
-		s.inviteLimiter.Fail("ip:" + clientIP(r))
+		s.inviteLimiter.Fail(s.rateKey(r))
 		writeError(w, http.StatusBadRequest, "authenticator code is incorrect")
 		return
 	}

@@ -1,0 +1,58 @@
+{{- if .Values.admissionPolicy.enabled }}
+# RBAC cannot restrict by namespace label or name prefix, so the backend's
+# ClusterRole lets it create ServiceAccount tokens and RoleBindings in every
+# namespace. This policy narrows that to what the code does: kvui-u<id>
+# accounts in tenant namespaces, each bound to one kubevirt-ui role. Without
+# it, a compromised backend could mint a token for any ServiceAccount in the
+# cluster, such as a kube-system controller's.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "kvui.name" . }}-backend
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["*"]
+      resources: [serviceaccounts, serviceaccounts/token]
+      operations: [CREATE, UPDATE, DELETE]
+    - apiGroups: [rbac.authorization.k8s.io]
+      apiVersions: ["*"]
+      resources: [rolebindings]
+      operations: [CREATE, UPDATE, DELETE]
+  matchConditions:
+  - name: backend-only
+    expression: >-
+      request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:{{ include "kvui.name" . }}'
+  validations:
+  - expression: request.name.matches('^kvui-u[0-9]+$')
+    message: the backend may only manage kvui-u<id> ServiceAccounts and RoleBindings
+  # Deletes stay allowed in namespaces that lost the label, so stale
+  # memberships can still be removed.
+  - expression: >-
+      request.operation != 'CREATE' ||
+      (has(namespaceObject.metadata.labels) &&
+       'kubevirt-ui.io/tenant' in namespaceObject.metadata.labels &&
+       namespaceObject.metadata.labels['kubevirt-ui.io/tenant'] == 'true')
+    message: the backend may only provision in namespaces labelled kubevirt-ui.io/tenant=true
+  - expression: >-
+      request.resource.resource != 'rolebindings' || request.operation == 'DELETE' ||
+      (object.roleRef.kind == 'ClusterRole' &&
+       object.roleRef.name in ['kubevirt-ui-owner', 'kubevirt-ui-operator', 'kubevirt-ui-viewer'] &&
+       has(object.subjects) && size(object.subjects) == 1 &&
+       object.subjects[0].kind == 'ServiceAccount' &&
+       object.subjects[0].name == request.name &&
+       object.subjects[0].namespace == request.namespace)
+    message: backend RoleBindings must bind a kubevirt-ui role to their own kvui-u<id> ServiceAccount only
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "kvui.name" . }}-backend
+  labels: {{- include "kvui.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "kvui.name" . }}-backend
+  validationActions: [Deny]
+{{- end }}

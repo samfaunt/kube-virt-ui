@@ -85,3 +85,28 @@ func TestFailureLimiter(t *testing.T) {
 		t.Fatal("still locked after reset")
 	}
 }
+
+func TestHashConcurrencyBounded(t *testing.T) {
+	// Occupy every slot; a hash must then wait until one is released.
+	for range maxConcurrentHashes {
+		hashSlots <- struct{}{}
+	}
+	done := make(chan struct{})
+	go func() {
+		HashPassword("long-enough-password")
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("hash ran with every slot taken")
+	case <-time.After(100 * time.Millisecond):
+	}
+	for range maxConcurrentHashes {
+		<-hashSlots
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hash did not run after slots were released")
+	}
+}

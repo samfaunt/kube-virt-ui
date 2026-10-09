@@ -75,7 +75,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userKey := "user:" + strings.ToLower(req.Username)
-	ipKey := "ip:" + clientIP(r)
+	ipKey := s.rateKey(r)
 	if !s.loginLimiter.Allowed(userKey) || !s.loginLimiter.Allowed(ipKey) {
 		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
 		return
