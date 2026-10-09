@@ -174,7 +174,7 @@ func (s *Server) watchVMs(w http.ResponseWriter, r *http.Request) {
 		vms, err := vm.List(ctx, c.dyn, c.namespace)
 		if err != nil {
 			if ctx.Err() == nil {
-				fmt.Fprintf(w, "event: failure\ndata: %q\n\n", err.Error())
+				fmt.Fprintf(w, "event: failure\ndata: %q\n\n", err.Error()) // #nosec G705 -- text/event-stream with nosniff, never rendered as HTML
 				flusher.Flush()
 			}
 			return false

@@ -65,7 +65,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u store.Us
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: token, Path: "/",
 		MaxAge: int(sessionTTL.Seconds()), HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode,
-	})
+	}) // #nosec G124 -- Secure is off only with KVUI_INSECURE_COOKIES, for local plain-HTTP development
 	return nil
 }
 
@@ -148,7 +148,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.SecureCookies, SameSite: http.SameSiteStrictMode}) // #nosec G124 -- see startSession
 	w.WriteHeader(http.StatusNoContent)
 }
 

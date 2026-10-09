@@ -3,7 +3,7 @@ package auth
 import (
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G505 -- RFC 6238 TOTP is HMAC-SHA1; authenticator apps require it
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
@@ -64,7 +64,7 @@ func VerifyTOTP(secret, code string, now time.Time) (step int64, ok bool) {
 
 func hotp(key []byte, counter int64) string {
 	var msg [8]byte
-	binary.BigEndian.PutUint64(msg[:], uint64(counter))
+	binary.BigEndian.PutUint64(msg[:], uint64(counter)) // #nosec G115 -- counter is unix time / 30, never negative
 	mac := hmac.New(sha1.New, key)
 	mac.Write(msg[:])
 	sum := mac.Sum(nil)

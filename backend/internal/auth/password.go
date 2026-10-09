@@ -80,7 +80,7 @@ func VerifyPassword(hash, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	got := idKey([]byte(password), salt, time, memory, threads, uint32(len(want)))
+	got := idKey([]byte(password), salt, time, memory, threads, uint32(len(want))) // #nosec G115 -- key length from our own hash format, 32 bytes
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
