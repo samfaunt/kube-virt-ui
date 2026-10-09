@@ -118,8 +118,8 @@ Dockerfile  builds both into one distroless image (published by .github/workflow
   pod CIDR so login rate limits and the audit log see real client addresses.
 - **A CNI that enforces NetworkPolicy** (e.g. Cilium). Talos' default Flannel
   does not, so the policies in `deploy/examples/tenant-namespace.yaml` would be
-  silently ignored. Those policies also matter for security: they stop the CDI
-  importer, which fetches user-supplied URLs, from reaching internal services.
+  silently ignored. The importer egress policy is a security requirement; see
+  [Tenant namespaces](#tenant-namespaces).
 
 ## Install
 
@@ -142,6 +142,22 @@ kubectl apply -f deploy/examples/tenant-namespace.yaml   # edit first
 Open the printed link to create the first administrator. Back up the generated
 `<release>-key` Secret: it encrypts the TOTP secrets, and losing it locks
 every user out of two-factor login.
+
+## Tenant namespaces
+
+The chart does not know your tenant namespaces, so it cannot create their
+policies. Set each one up from `deploy/examples/tenant-namespace.yaml`: the
+`kubevirt-ui.io/tenant=true` label, a quota, and the network policies.
+
+**The `importer-egress` NetworkPolicy is required** in every tenant namespace
+whose users can import disks by URL. CDI's importer pod runs in the tenant
+namespace and fetches whatever URL the user gave. The backend rejects obvious
+internal targets (private IPs, `.svc` names, `localhost`), but that check is
+defence in depth only: a public hostname can resolve, or redirect, to a
+private, cluster or cloud metadata (`169.254.169.254`) address. Only the
+egress policy, enforced by the CNI, stops that. If your pod or service CIDRs
+are outside the private ranges it already excludes, add them to its `except`
+list.
 
 ## Develop
 

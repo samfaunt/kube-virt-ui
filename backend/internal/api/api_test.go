@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -214,5 +215,47 @@ func TestLoginLockout(t *testing.T) {
 	}
 	if st := e.do(c, "POST", "/api/login", bad, nil); st != 429 {
 		t.Fatalf("not locked out: %d", st)
+	}
+}
+
+// TestLoginLockoutIsPerSource checks that failures for an account from one
+// source lock only that source out, not the account's owner elsewhere.
+func TestLoginLockoutIsPerSource(t *testing.T) {
+	e := newEnv(t)
+	e.api.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")}
+	_, link, err := CreateInvite(context.Background(), e.store, "https://ui.test",
+		store.Invite{MakeAdmin: true, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := e.redeem(e.client(), link, "root")
+
+	login := func(from string, body map[string]string) int {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", e.srv.URL+"/api/login", bytes.NewReader(b))
+		req.Header.Set("X-Requested-With", "kvui")
+		req.Header.Set("X-Forwarded-For", from)
+		resp, err := e.client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	const attacker, owner = "198.51.100.1", "203.0.113.7"
+	bad := map[string]string{"username": "root", "password": "wrong password here", "code": "000000"}
+	for i := 0; i < 10; i++ {
+		if st := login(attacker, bad); st != 401 {
+			t.Fatalf("attempt %d: %d", i, st)
+		}
+	}
+	if st := login(attacker, bad); st != 429 {
+		t.Fatalf("attacker not locked out: %d", st)
+	}
+	good := map[string]string{"username": "root", "password": "a long enough password", "code": e.code(secret)}
+	if st := login(owner, good); st != 200 {
+		t.Fatalf("owner locked out by another source: %d", st)
 	}
 }

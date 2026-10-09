@@ -74,8 +74,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	userKey := "user:" + strings.ToLower(req.Username)
+	// Failures count per source and per (account, source). The account
+	// counter is scoped to the source so that failures from one address
+	// cannot lock the account out for everyone else (including the sole
+	// admin); distributed guessing is already impractical against Argon2id
+	// plus a required second factor.
 	ipKey := s.rateKey(r)
+	userKey := "user:" + strings.ToLower(req.Username) + "|" + ipKey
 	if !s.loginLimiter.Allowed(userKey) || !s.loginLimiter.Allowed(ipKey) {
 		writeError(w, http.StatusTooManyRequests, "too many failed attempts, try again later")
 		return

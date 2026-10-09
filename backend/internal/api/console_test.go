@@ -3,15 +3,75 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"kvui/internal/auth"
 	"kvui/internal/store"
+	"kvui/internal/tenant/tenanttest"
 )
+
+// setTenant labels or de-labels a namespace in the fake cluster.
+func (e *env) setTenant(namespace string, isTenant bool) {
+	e.t.Helper()
+	if _, err := e.k8s.CoreV1().Namespaces().Update(context.Background(),
+		tenanttest.Namespace(namespace, isTenant), metav1.UpdateOptions{}); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func TestConsoleRevoked(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	_, link, _ := CreateInvite(ctx, e.store, "https://ui.test", store.Invite{
+		Namespace: "team-a", Role: "operator", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	alice := e.client()
+	e.redeem(alice, link, "alice")
+	srvURL, _ := url.Parse(e.srv.URL)
+	var sessionHash string
+	for _, c := range alice.Jar.Cookies(srvURL) {
+		if c.Name == sessionCookie {
+			sessionHash = auth.HashToken(c.Value)
+		}
+	}
+	if sessionHash == "" {
+		t.Fatal("no session cookie")
+	}
+
+	if reason := e.api.consoleRevoked(sessionHash, 1, "team-a", "operator"); reason != "" {
+		t.Fatalf("valid console revoked: %q", reason)
+	}
+
+	// Downgrading to viewer (no console access) closes the console.
+	if err := e.store.UpsertMembership(ctx, store.Membership{UserID: 1, Namespace: "team-a", Role: "viewer"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if reason := e.api.consoleRevoked(sessionHash, 1, "team-a", "operator"); reason == "" {
+		t.Fatal("console kept open after downgrade to viewer")
+	}
+	// So does any other role change.
+	if err := e.store.UpsertMembership(ctx, store.Membership{UserID: 1, Namespace: "team-a", Role: "owner"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if reason := e.api.consoleRevoked(sessionHash, 1, "team-a", "operator"); reason == "" {
+		t.Fatal("console kept open after role change")
+	}
+
+	// Removing the tenant label closes the console.
+	if err := e.store.UpsertMembership(ctx, store.Membership{UserID: 1, Namespace: "team-a", Role: "operator"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e.setTenant("team-a", false)
+	if reason := e.api.consoleRevoked(sessionHash, 1, "team-a", "operator"); reason == "" {
+		t.Fatal("console kept open after namespace lost tenant label")
+	}
+}
 
 // fakeConsole stands in for KubeVirt's console websocket: it requires the
 // plain.kubevirt.io subprotocol and echoes every message back.

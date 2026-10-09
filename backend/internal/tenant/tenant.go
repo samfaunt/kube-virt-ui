@@ -167,7 +167,23 @@ func (p *Provisioner) Remove(ctx context.Context, namespace string, userID int64
 // ServiceAccount. Callers must have checked the membership exists. If the
 // ServiceAccount is missing (provisioning failed earlier, or was deleted out
 // of band) it is recreated first.
+//
+// The namespace must still be a tenant. Once an admin removes the tenant
+// label, UserConfig returns ErrNotTenant and, best effort, removes the
+// membership's ServiceAccount and RoleBinding so tokens already handed out
+// stop working too (the admission policy keeps deletes allowed in
+// de-labelled namespaces for this). The membership row is kept, so
+// relabelling the namespace restores access: the ServiceAccount is then
+// recreated as above.
 func (p *Provisioner) UserConfig(ctx context.Context, namespace string, userID int64, username, role string) (*rest.Config, error) {
+	if err := p.CheckTenant(ctx, namespace); err != nil {
+		if errors.Is(err, ErrNotTenant) {
+			// Remove drops the cached token before calling the apiserver, so
+			// no further token is served even if the deletes fail.
+			_ = p.Remove(ctx, namespace, userID) // best effort; access is denied regardless
+		}
+		return nil, err
+	}
 	token, err := p.token(ctx, namespace, userID)
 	if apierrors.IsNotFound(err) {
 		if err := p.Ensure(ctx, namespace, userID, username, role); err != nil {
