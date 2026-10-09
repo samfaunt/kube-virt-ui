@@ -22,7 +22,21 @@ const (
 	argonSaltLen = 16
 
 	MinPasswordLen = 12
+
+	// maxConcurrentHashes bounds Argon2 memory to this many times
+	// argonMemory. Login is unauthenticated, so without a bound a burst of
+	// parallel attempts allocates 64 MiB each and gets the pod OOM-killed.
+	maxConcurrentHashes = 2
 )
+
+var hashSlots = make(chan struct{}, maxConcurrentHashes)
+
+// idKey is argon2.IDKey limited to maxConcurrentHashes at a time.
+func idKey(password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) []byte {
+	hashSlots <- struct{}{}
+	defer func() { <-hashSlots }()
+	return argon2.IDKey(password, salt, time, memory, threads, keyLen)
+}
 
 var ErrWeakPassword = fmt.Errorf("password must be at least %d characters", MinPasswordLen)
 
@@ -35,7 +49,7 @@ func HashPassword(password string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	key := idKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
 	b64 := base64.RawStdEncoding
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonTime, argonThreads,
@@ -66,7 +80,7 @@ func VerifyPassword(hash, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	got := argon2.IDKey([]byte(password), salt, time, memory, threads, uint32(len(want)))
+	got := idKey([]byte(password), salt, time, memory, threads, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 

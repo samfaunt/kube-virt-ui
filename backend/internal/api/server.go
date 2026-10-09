@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -29,8 +30,10 @@ type Options struct {
 	Sealer        *auth.Sealer
 	PublicURL     string // e.g. https://vms.example.com, used in invite links
 	SecureCookies bool
-	TrustProxy    bool   // honour X-Forwarded-For from the ingress
-	StaticDir     string // built frontend; empty disables static serving
+	// TrustedProxies are the addresses of reverse proxies (the ingress
+	// controller) whose X-Forwarded-For is believed. Empty: use the peer.
+	TrustedProxies []netip.Prefix
+	StaticDir      string // built frontend; empty disables static serving
 }
 
 type Server struct {
@@ -56,9 +59,6 @@ func New(o Options) *Server {
 
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	if s.TrustProxy {
-		r.Use(middleware.RealIP)
-	}
 	r.Use(middleware.Recoverer, securityHeaders)
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 
@@ -181,16 +181,55 @@ func internalError(w http.ResponseWriter, r *http.Request, err error) {
 	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP returns the address of the client that sent r. X-Forwarded-For
+// is walked right to left only while the hop that reported it is a trusted
+// proxy, so a client cannot choose its address by sending the header itself.
+func (s *Server) clientIP(r *http.Request) netip.Addr {
+	peer, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return netip.Addr{}
 	}
-	return host
+	ip := peer.Addr().Unmap()
+	var hops []string
+	for _, h := range r.Header.Values("X-Forwarded-For") {
+		hops = append(hops, strings.Split(h, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0 && s.trustedProxy(ip); i-- {
+		next, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			break
+		}
+		ip = next.WithZone("").Unmap()
+	}
+	return ip
+}
+
+func (s *Server) trustedProxy(ip netip.Addr) bool {
+	for _, p := range s.TrustedProxies {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// rateKey is the rate-limiting key for r's client. IPv6 clients are keyed
+// by /64, the smallest block an end site is normally assigned, so rotating
+// addresses within it does not reset the limit.
+func (s *Server) rateKey(r *http.Request) string {
+	ip := s.clientIP(r)
+	if ip.Is6() {
+		p, _ := ip.Prefix(64)
+		return "ip:" + p.String()
+	}
+	return "ip:" + ip.String()
 }
 
 func (s *Server) audit(r *http.Request, actor *store.User, action, namespace, target string) {
-	e := store.AuditEntry{At: s.now(), Action: action, Namespace: namespace, Target: target, IP: clientIP(r)}
+	e := store.AuditEntry{At: s.now(), Action: action, Namespace: namespace, Target: target}
+	if ip := s.clientIP(r); ip.IsValid() {
+		e.IP = ip.String()
+	}
 	if actor != nil {
 		e.ActorID, e.Actor = &actor.ID, actor.Username
 	}

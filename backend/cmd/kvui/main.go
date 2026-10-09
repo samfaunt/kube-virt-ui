@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,13 +31,13 @@ import (
 )
 
 type config struct {
-	listen     string
-	dbPath     string
-	secretKey  []byte
-	publicURL  string
-	staticDir  string
-	insecure   bool // plain-HTTP cookies, for local development only
-	trustProxy bool
+	listen         string
+	dbPath         string
+	secretKey      []byte
+	publicURL      string
+	staticDir      string
+	insecure       bool // plain-HTTP cookies, for local development only
+	trustedProxies []netip.Prefix
 
 	cdiNamespace      string
 	uploadProxyURL    string
@@ -57,8 +59,18 @@ func loadConfig() (config, error) {
 	if c.insecure, err = envBool("KVUI_INSECURE_COOKIES"); err != nil {
 		return c, err
 	}
-	if c.trustProxy, err = envBool("KVUI_TRUST_PROXY"); err != nil {
-		return c, err
+	if os.Getenv("KVUI_TRUST_PROXY") != "" {
+		return c, errors.New("KVUI_TRUST_PROXY was replaced by KVUI_TRUSTED_PROXIES: set it to the ingress controller's address range(s), e.g. 10.244.0.0/16")
+	}
+	for _, v := range strings.Split(os.Getenv("KVUI_TRUSTED_PROXIES"), ",") {
+		if v = strings.TrimSpace(v); v == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(v)
+		if err != nil {
+			return c, fmt.Errorf("KVUI_TRUSTED_PROXIES: %w", err)
+		}
+		c.trustedProxies = append(c.trustedProxies, p.Masked())
 	}
 	if c.publicURL == "" {
 		return c, errors.New("KVUI_PUBLIC_URL is required (used in invite links)")
@@ -159,11 +171,11 @@ func run() error {
 			CAConfigMapKey:       "ca-bundle.crt",
 			Kube:                 client,
 		},
-		Sealer:        sealer,
-		PublicURL:     cfg.publicURL,
-		SecureCookies: !cfg.insecure,
-		TrustProxy:    cfg.trustProxy,
-		StaticDir:     cfg.staticDir,
+		Sealer:         sealer,
+		PublicURL:      cfg.publicURL,
+		SecureCookies:  !cfg.insecure,
+		TrustedProxies: cfg.trustedProxies,
+		StaticDir:      cfg.staticDir,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
