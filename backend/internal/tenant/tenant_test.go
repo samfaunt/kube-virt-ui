@@ -64,3 +64,40 @@ func TestUserConfigReprovisions(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUserConfigRefusesDelabelledNamespace(t *testing.T) {
+	ctx := context.Background()
+	c := tenanttest.FakeClient(tenanttest.Namespace("team-a", true))
+	p := tenant.NewProvisioner(c, &rest.Config{})
+	if _, err := p.UserConfig(ctx, "team-a", 7, "alice", "operator"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An admin removes the tenant label: the cached token must not be served
+	// and the membership's ServiceAccount and RoleBinding are cleaned up.
+	if _, err := c.CoreV1().Namespaces().Update(ctx, tenanttest.Namespace("team-a", false), metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UserConfig(ctx, "team-a", 7, "alice", "operator"); !errors.Is(err, tenant.ErrNotTenant) {
+		t.Fatalf("de-labelled namespace: %v", err)
+	}
+	if _, err := c.CoreV1().ServiceAccounts("team-a").Get(ctx, "kvui-u7", metav1.GetOptions{}); err == nil {
+		t.Fatal("serviceaccount not removed")
+	}
+	if _, err := c.RbacV1().RoleBindings("team-a").Get(ctx, "kvui-u7", metav1.GetOptions{}); err == nil {
+		t.Fatal("rolebinding not removed")
+	}
+
+	// Relabelling restores access by reprovisioning.
+	if _, err := c.CoreV1().Namespaces().Update(ctx, tenanttest.Namespace("team-a", true), metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := p.UserConfig(ctx, "team-a", 7, "alice", "operator"); err != nil || cfg.BearerToken != "tok-team-a-kvui-u7" {
+		t.Fatalf("relabelled: %+v %v", cfg, err)
+	}
+
+	// A namespace deleted outright is refused too.
+	if _, err := p.UserConfig(ctx, "gone", 7, "alice", "operator"); !errors.Is(err, tenant.ErrNotTenant) {
+		t.Fatalf("missing namespace: %v", err)
+	}
+}

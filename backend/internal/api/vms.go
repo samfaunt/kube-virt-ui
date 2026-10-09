@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"kvui/internal/store"
+	"kvui/internal/tenant"
 	"kvui/internal/vm"
 )
 
@@ -53,6 +54,10 @@ func (s *Server) clientsFor(w http.ResponseWriter, r *http.Request) (userClients
 		return userClients{}, false
 	}
 	cfg, err := s.Tenants.UserConfig(r.Context(), ns, u.ID, u.Username, m.Role)
+	if errors.Is(err, tenant.ErrNotTenant) {
+		writeError(w, http.StatusForbidden, "namespace is no longer a kubevirt-ui tenant")
+		return userClients{}, false
+	}
 	if err != nil {
 		internalError(w, r, err)
 		return userClients{}, false

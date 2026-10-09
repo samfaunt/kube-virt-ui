@@ -104,6 +104,30 @@ func TestVMListAndActionsUseUserToken(t *testing.T) {
 	}
 }
 
+func TestDelabelledNamespaceRefused(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	_, link, _ := CreateInvite(ctx, e.store, "https://ui.test", store.Invite{
+		Namespace: "team-a", Role: "operator", CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	alice := e.client()
+	e.redeem(alice, link, "alice")
+	if st := e.do(alice, "GET", "/api/namespaces/team-a/vms", nil, nil); st != 200 {
+		t.Fatalf("list: %d", st)
+	}
+
+	// The membership row stays, but the namespace is no longer a tenant, so
+	// the cached token must not be used.
+	e.setTenant("team-a", false)
+	before := len(e.requests)
+	var errBody struct{ Error string }
+	if st := e.do(alice, "GET", "/api/namespaces/team-a/vms", nil, &errBody); st != 403 || errBody.Error == "" {
+		t.Fatalf("de-labelled namespace: %d %+v", st, errBody)
+	}
+	if len(e.requests) != before {
+		t.Fatalf("apiserver called for de-labelled namespace: %v", e.requests[before:])
+	}
+}
+
 func TestCreateVM(t *testing.T) {
 	e := newEnv(t)
 	_, link, _ := CreateInvite(context.Background(), e.store, "https://ui.test", store.Invite{
