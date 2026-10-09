@@ -4,11 +4,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -60,7 +61,7 @@ func New(o Options) *Server {
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer, securityHeaders)
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(requireCSRFHeader)
@@ -140,15 +141,18 @@ func requireCSRFHeader(next http.Handler) http.Handler {
 }
 
 // spa serves the built frontend, falling back to index.html for client routes.
+// Paths are resolved inside an fs.FS, which rejects anything escaping dir.
 func spa(dir string) http.HandlerFunc {
-	files := http.FileServer(http.Dir(dir))
+	fsys := os.DirFS(dir)
+	files := http.FileServerFS(fsys)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
-		if info, err := os.Stat(filepath.Join(dir, filepath.Clean("/"+r.URL.Path))); err != nil || info.IsDir() {
-			http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if info, err := fs.Stat(fsys, name); err != nil || info.IsDir() {
+			http.ServeFileFS(w, r, fsys, "index.html")
 			return
 		}
 		files.ServeHTTP(w, r)
@@ -168,7 +172,9 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Debug("write response", "err", err) // client went away
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

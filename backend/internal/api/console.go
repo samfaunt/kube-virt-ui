@@ -79,12 +79,12 @@ func (s *Server) console(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-errc:
 			msg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "console closed")
-			client.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+			_ = client.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second)) // best effort; closing anyway
 			return
 		case <-ticker.C:
 			if reason := s.consoleRevoked(sessionHash, u.ID, c.namespace); reason != "" {
 				msg := websocket.FormatCloseMessage(websocket.ClosePolicyViolation, reason)
-				client.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+				_ = client.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second)) // best effort; closing anyway
 				return
 			}
 			// Keeps idle consoles alive through proxies and load balancers.

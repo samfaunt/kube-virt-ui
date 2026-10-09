@@ -62,6 +62,6 @@ func statusError(resp *http.Response) error {
 		status.Message = fmt.Sprintf("console handshake failed: %s", resp.Status)
 	}
 	status.Status = metav1.StatusFailure
-	status.Code = int32(resp.StatusCode)
+	status.Code = int32(resp.StatusCode) // #nosec G115 -- HTTP status codes are three digits
 	return &apierrors.StatusError{ErrStatus: status}
 }
