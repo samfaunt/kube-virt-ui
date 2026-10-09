@@ -183,8 +183,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 // internalError logs err and returns a generic 500 so internals don't leak.
 func internalError(w http.ResponseWriter, r *http.Request, err error) {
-	slog.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+	slog.Error("request failed", "method", r.Method, "route", routePattern(r), "err", err)
 	writeError(w, http.StatusInternalServerError, "internal error")
+}
+
+// routePattern returns the matched chi route (e.g. /api/invites/{token}).
+// Logs use it instead of r.URL.Path because some paths carry bearer
+// credentials such as invite tokens.
+func routePattern(r *http.Request) string {
+	if rc := chi.RouteContext(r.Context()); rc != nil {
+		if p := rc.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return "unknown"
 }
 
 // clientIP returns the address of the client that sent r. X-Forwarded-For
